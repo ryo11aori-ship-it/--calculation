@@ -38,6 +38,7 @@ jobs:
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
           static constexpr long double LOG2_10 = 3.32192809488736234787L;
+          static constexpr unsigned long OUTPUT_LIMIT_DIGITS = 1000000UL;
 
           struct Mpz {
               mpz_t v;
@@ -263,14 +264,15 @@ jobs:
               if (!fp) return 1;
               setvbuf(fp, nullptr, _IOFBF, 1 << 20);
 
-              int out_digits = (digits > static_cast<unsigned long>(INT_MAX - 1))
+              unsigned long out_digits_ul = min(digits, OUTPUT_LIMIT_DIGITS);
+              int out_digits = (out_digits_ul > static_cast<unsigned long>(INT_MAX - 1))
                   ? (INT_MAX - 1)
-                  : static_cast<int>(digits);
+                  : static_cast<int>(out_digits_ul);
 
               gmp_fprintf(fp, "%.*Ff\n", out_digits, pi);
               fclose(fp);
 
-              cout << out_digits << "桁" << endl;
+              cout << digits << "桁" << endl;
 
               mpf_clear(pi);
               mpf_clear(tf);
