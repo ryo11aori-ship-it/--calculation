@@ -39,6 +39,7 @@ jobs:
           Mpz& operator=(Mpz&& other) noexcept { mpz_swap(v, other.v); return *this; }
           void swap(Mpz& other) noexcept { mpz_swap(v, other.v); }
           mpz_ptr get() { return v; }
+          mpz_srcptr get() const { return v; }
           };
           struct BS {
           Mpz P, Q, T;
