@@ -1,4 +1,4 @@
-name: Calculate_Pi_1000w
+name: Calculate_Pi_Benchmark
 on:
   push:
   workflow_dispatch:
@@ -14,101 +14,164 @@ jobs:
         run: |
           cat << 'EOF' > main.cpp
           #include <algorithm>
+          #include <array>
           #include <atomic>
           #include <chrono>
           #include <gmp.h>
           #include <iostream>
+          #include <optional>
           #include <thread>
-          #include <vector>
           using namespace std;
+
           static constexpr unsigned long LIMIT_SEC = 55;
           static constexpr unsigned long CHUNK = 4096;
           static constexpr unsigned long LEAF = 128;
           static constexpr unsigned long BLOCKS_PER_TASK = 4;
+
           static constexpr unsigned long long A = 13591409ULL;
           static constexpr unsigned long long B = 545140134ULL;
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
+
           struct Mpz {
-          mpz_t v;
-          Mpz() { mpz_init(v); }
-          ~Mpz() { mpz_clear(v); }
-          Mpz(const Mpz&) = delete;
-          Mpz& operator=(const Mpz&) = delete;
-          Mpz(Mpz&& other) noexcept { mpz_init(v); mpz_swap(v, other.v); }
-          Mpz& operator=(Mpz&& other) noexcept { mpz_swap(v, other.v); return *this; }
-          void swap(Mpz& other) noexcept { mpz_swap(v, other.v); }
-          mpz_ptr get() { return v; }
-          mpz_srcptr get() const { return v; }
+              mpz_t v;
+              Mpz() { mpz_init(v); }
+              ~Mpz() { mpz_clear(v); }
+              Mpz(const Mpz&) = delete;
+              Mpz& operator=(const Mpz&) = delete;
+              Mpz(Mpz&& o) noexcept { mpz_init(v); mpz_swap(v, o.v); }
+              Mpz& operator=(Mpz&& o) noexcept { mpz_swap(v, o.v); return *this; }
+              void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
+              mpz_ptr get() { return v; }
+              mpz_srcptr get() const { return v; }
           };
+
           struct BS {
-          Mpz P, Q, T;
-          void swap(BS& other) noexcept { P.swap(other.P); Q.swap(other.Q); T.swap(other.T); }
+              Mpz P, Q, T;
+              void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
           };
-          static inline void combine_into(BS& out, const BS& left, const BS& right) {
-          mpz_mul(out.P.get(), left.P.get(), right.P.get());
-          mpz_mul(out.Q.get(), left.Q.get(), right.Q.get());
-          mpz_mul(out.T.get(), left.T.get(), right.Q.get());
-          mpz_addmul(out.T.get(), right.T.get(), left.P.get());
+
+          static inline void combine_into(BS& out, const BS& L, const BS& R) {
+              mpz_mul(out.P.get(), L.P.get(), R.P.get());
+              mpz_mul(out.Q.get(), L.Q.get(), R.Q.get());
+              mpz_mul(out.T.get(), L.T.get(), R.Q.get());
+              mpz_addmul(out.T.get(), R.T.get(), L.P.get());
           }
-          static inline void term_into(BS& out, unsigned long k) {
-          if (k == 0) {
-          mpz_set_ui(out.P.get(), 1UL);
-          mpz_set_ui(out.Q.get(), 1UL);
-          mpz_set_ui(out.T.get(), static_cast<unsigned long>(A));
-          return;
+
+          static inline void term_into(BS& o, unsigned long k) {
+              if (k == 0) {
+                  mpz_set_ui(o.P.get(), 1);
+                  mpz_set_ui(o.Q.get(), 1);
+                  mpz_set_ui(o.T.get(), A);
+                  return;
+              }
+              mpz_set_ui(o.P.get(), 6*k-5);
+              mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
+              mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
+
+              mpz_set_ui(o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
+
+              mpz_set(o.T.get(), o.P.get());
+              mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
+              if (k & 1) mpz_neg(o.T.get(), o.T.get());
           }
-          mpz_set_ui(out.P.get(), 6UL * k - 5UL);
-          mpz_mul_ui(out.P.get(), out.P.get(), 2UL * k - 1UL);
-          mpz_mul_ui(out.P.get(), out.P.get(), 6UL * k - 1UL);
-          mpz_set_ui(out.Q.get(), k);
-          mpz_mul_ui(out.Q.get(), out.Q.get(), k);
-          mpz_mul_ui(out.Q.get(), out.Q.get(), k);
-          mpz_mul_ui(out.Q.get(), out.Q.get(), static_cast<unsigned long>(C3_OVER_24));
-          mpz_set(out.T.get(), out.P.get());
-          mpz_mul_ui(out.T.get(), out.T.get(), static_cast<unsigned long>(A + B * k));
-          if (k & 1UL) mpz_neg(out.T.get(), out.T.get());
-          }
+
           static BS bs(unsigned long a, unsigned long b) {
-          if (b - a == 1) { BS r; term_into(r, a); return r; }
-          if (b - a <= LEAF) {
-          BS r; term_into(r, a);
-          for (unsigned long k = a + 1; k < b; ++k) {
-          BS t; term_into(t, k);
-          BS tmp; combine_into(tmp, r, t);
-          r.swap(tmp);
+              if (b - a == 1) { BS r; term_into(r, a); return r; }
+              if (b - a <= LEAF) {
+                  BS r; term_into(r, a);
+                  for (unsigned long k=a+1;k<b;++k){
+                      BS t; term_into(t,k);
+                      BS tmp; combine_into(tmp,r,t);
+                      r.swap(tmp);
+                  }
+                  return r;
+              }
+              unsigned long m = (a+b)>>1;
+              BS L = bs(a,m);
+              BS R = bs(m,b);
+              BS o; combine_into(o,L,R);
+              return o;
           }
-          return r;
+
+          static void push_part(array<optional<BS>,64>& bins, size_t& maxl, BS part){
+              size_t lvl=0;
+              while(true){
+                  if(lvl>=bins.size()){
+                      bins.back()=move(part);
+                      maxl=max(maxl,bins.size()-1);
+                      return;
+                  }
+                  if(!bins[lvl]){
+                      bins[lvl]=move(part);
+                      maxl=max(maxl,lvl);
+                      return;
+                  }
+                  BS tmp; combine_into(tmp,*bins[lvl],part);
+                  bins[lvl].reset();
+                  part.swap(tmp);
+                  ++lvl;
+              }
           }
-          unsigned long m = a + ((b - a) >> 1);
-          BS left = bs(a, m);
-          BS right = bs(m, b);
-          BS out; combine_into(out, left, right);
-          return out;
-          }
-          int main() {
-          auto start = chrono::steady_clock::now();
-          atomic<unsigned long> next_term{1};
-          const unsigned workers = max(1u, min(thread::hardware_concurrency() == 0 ? 1u : thread::hardware_concurrency(), 4u));
-          const unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
-          vector<vector<BS>> local_blocks(workers);
-          vector<thread> threads;
-          for (unsigned tid = 0; tid < workers; ++tid) {
-          threads.emplace_back([&, tid]() {
-          while (true) {
-          auto now = chrono::steady_clock::now();
-          if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) break;
-          unsigned long a = next_term.fetch_add(task_span, memory_order_relaxed);
-          local_blocks[tid].push_back(bs(a, a + task_span));
-          }
-          });
-          }
-          for (auto& th : threads) th.join();
-          unsigned long terms = next_term.load(memory_order_relaxed) - 1;
-          long double estimated_digits = static_cast<long double>(terms) * DIGITS_PER_TERM;
-          unsigned long digits = estimated_digits > 16.0L ? static_cast<unsigned long>(estimated_digits) - 8UL : static_cast<unsigned long>(estimated_digits);
-          cout << digits << "桁" << endl;
-          return 0;
+
+          int main(){
+              auto start = chrono::steady_clock::now();
+
+              atomic<unsigned long> next_term{1};
+              const unsigned workers = max(1u,min(thread::hardware_concurrency()?thread::hardware_concurrency():1u,4u));
+              const unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
+
+              array<array<optional<BS>,64>,4> local_bins;
+              array<size_t,4> local_max{};
+              vector<thread> ths;
+
+              for(unsigned t=0;t<workers;++t){
+                  ths.emplace_back([&,t](){
+                      while(true){
+                          auto now=chrono::steady_clock::now();
+                          if(chrono::duration_cast<chrono::seconds>(now-start).count()>=LIMIT_SEC) break;
+
+                          unsigned long a = next_term.fetch_add(task_span, memory_order_relaxed);
+                          BS part = bs(a,a+task_span);
+                          push_part(local_bins[t], local_max[t], move(part));
+                      }
+                  });
+              }
+
+              for(auto& th:ths) th.join();
+
+              // global reduce（ここが重要）
+              array<optional<BS>,64> bins;
+              size_t maxl=0;
+
+              for(unsigned t=0;t<workers;++t){
+                  for(int i=(int)local_max[t];i>=0;--i){
+                      if(local_bins[t][i]){
+                          push_part(bins,maxl,move(*local_bins[t][i]));
+                      }
+                  }
+              }
+
+              // final combine（最大サイズ乗算）
+              BS total;
+              bool init=false;
+              for(int i=(int)maxl;i>=0;--i){
+                  if(!bins[i]) continue;
+                  if(!init){ total=move(*bins[i]); init=true; }
+                  else{
+                      BS tmp; combine_into(tmp,total,*bins[i]);
+                      total.swap(tmp);
+                  }
+              }
+
+              unsigned long terms = next_term.load() - 1;
+              long double digits = (long double)terms * DIGITS_PER_TERM;
+
+              cout << (unsigned long)(digits - 8) << "桁" << endl;
+              return 0;
           }
           EOF
 
