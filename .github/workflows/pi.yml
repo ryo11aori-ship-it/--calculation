@@ -1,62 +1,121 @@
-name: Calculate_Pi
+name: Calculate_Pi_Optimized
 on:
   push:
   workflow_dispatch:
+
 jobs:
   run-pi:
     runs-on: ubuntu-latest
     steps:
-    - name: Install_Dependencies
-      run: sudo apt-get update && sudo apt-get install -y libgmp-dev
-    - name: Create_Code
-      run: |
-        cat << 'EOF' > main.cpp
-        #include<iostream>
-        #include<fstream>
-        #include<chrono>
-        #include<gmp.h>
-        #include<gmpxx.h>
-        using namespace std;
-        int main(){
-        mpf_set_default_prec(33219280);
-        mpz_class M=1;
-        mpz_class L=13591409;
-        mpz_class X=1;
-        mpz_class K=6;
-        mpz_class k=0;
-        mpf_class S=13591409;
-        mpz_class X_step("-262537412640768000");
-        auto start=chrono::steady_clock::now();
-        while(true){
-        auto now=chrono::steady_clock::now();
-        if(chrono::duration_cast<chrono::seconds>(now-start).count()>=55)break;
-        k++;
-        M=(K*K*K-16*K)*M/(k*k*k);
-        L+=545140134;
-        X*=X_step;
-        mpf_class term(M*L);
-        term/=X;
-        S+=term;
-        K+=12;
-        }
-        mpf_class pi;
-        mpf_class C=10005;
-        C=sqrt(C)*426880;
-        pi=C/S;
-        int digits=k.get_si()*14;
-        FILE* fp=fopen("pi.txt","w");
-        gmp_fprintf(fp,"%.*Ff\n",digits,pi.get_mpf_t());
-        fclose(fp);
-        cout<<digits<<"桁"<<endl;
-        return 0;
-        }
-        EOF
-    - name: Compile
-      run: g++ -O3 main.cpp -lgmpxx -lgmp
-    - name: Run
-      run: ./a.out
-    - name: Upload_Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: pi_result
-        path: pi.txt
+      - name: Install_Dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgmp-dev
+
+      - name: Create_Code
+        run: |
+          cat << 'EOF' > main.cpp
+          #include <chrono>
+          #include <climits>
+          #include <cmath>
+          #include <cstdio>
+          #include <gmpxx.h>
+          #include <iostream>
+
+          using namespace std;
+
+          static constexpr unsigned long BLOCK = 16;
+          static constexpr long LIMIT_SEC = 55;
+          static constexpr long A = 13591409;
+          static constexpr long B = 545140134;
+          static constexpr unsigned long C3_OVER_24 = 10939058860032000UL;
+          static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
+
+          struct BS {
+              mpz_class P;
+              mpz_class Q;
+              mpz_class T;
+          };
+
+          static inline BS combine(const BS& left, const BS& right) {
+              BS out;
+              out.P = left.P * right.P;
+              out.Q = left.Q * right.Q;
+              out.T = left.T * right.Q + right.T * left.P;
+              return out;
+          }
+
+          static BS bs(unsigned long a, unsigned long b) {
+              if (b - a == 1) {
+                  if (a == 0) {
+                      return {1, 1, A};
+                  }
+                  mpz_class k = a;
+                  mpz_class p = (6 * k - 5) * (2 * k - 1) * (6 * k - 1);
+                  mpz_class q = k * k * k * C3_OVER_24;
+                  mpz_class t = p * (A + B * k);
+                  if (a & 1UL) t = -t;
+                  return {p, q, t};
+              }
+
+              unsigned long m = (a + b) >> 1;
+              BS left = bs(a, m);
+              BS right = bs(m, b);
+              return combine(left, right);
+          }
+
+          int main() {
+              auto start = chrono::steady_clock::now();
+
+              BS acc = bs(0, 1);   // k = 0 の初期項
+              unsigned long terms = 1;
+
+              while (true) {
+                  auto now = chrono::steady_clock::now();
+                  if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) {
+                      break;
+                  }
+
+                  unsigned long next = terms + BLOCK;
+                  BS chunk = bs(terms, next);
+                  acc = combine(acc, chunk);
+                  terms = next;
+              }
+
+              // 収束速度から出力桁数を見積もる
+              unsigned long digits = static_cast<unsigned long>(terms * DIGITS_PER_TERM);
+              if (digits > 16) digits -= 4;
+
+              // 最終段だけ高精度浮動小数にする
+              mp_bitcnt_t bits = static_cast<mp_bitcnt_t>(digits * 332193ULL / 100000ULL + 4096ULL);
+              mpf_set_default_prec(bits);
+
+              mpf_class sqrt10005(10005);
+              sqrt10005 = sqrt(sqrt10005);
+              mpf_class C = sqrt10005 * 426880;
+              mpf_class pi = (C * acc.Q) / acc.T;
+
+              FILE* fp = fopen("pi.txt", "w");
+              if (!fp) return 1;
+
+              int out_digits = (digits > static_cast<unsigned long>(INT_MAX - 1))
+                               ? (INT_MAX - 1)
+                               : static_cast<int>(digits);
+
+              gmp_fprintf(fp, "%.*Ff\n", out_digits, pi.get_mpf_t());
+              fclose(fp);
+
+              cout << out_digits << "桁" << endl;
+              return 0;
+          }
+          EOF
+
+      - name: Compile
+        run: g++ -O3 -march=native -flto -pipe -DNDEBUG -std=c++17 main.cpp -lgmpxx -lgmp -o pi
+
+      - name: Run
+        run: ./pi
+
+      - name: Upload_Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi_result
+          path: pi.txt
