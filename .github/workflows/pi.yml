@@ -32,13 +32,13 @@ jobs:
           static constexpr unsigned long CHUNK = 4096;
           static constexpr unsigned long LEAF = 128;
           static constexpr unsigned long BLOCKS_PER_TASK = 4;
+          static constexpr unsigned long OUTPUT_LIMIT_DIGITS = 1000000UL;
 
           static constexpr unsigned long long A = 13591409ULL;
           static constexpr unsigned long long B = 545140134ULL;
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
           static constexpr long double LOG2_10 = 3.32192809488736234787L;
-          static constexpr unsigned long OUTPUT_LIMIT_DIGITS = 1000000UL;
 
           struct Mpz {
               mpz_t v;
@@ -241,14 +241,15 @@ jobs:
                   ? static_cast<unsigned long>(estimated_digits) - 8UL
                   : static_cast<unsigned long>(estimated_digits);
 
-              mp_bitcnt_t prec = static_cast<mp_bitcnt_t>((static_cast<long double>(digits) + 256.0L) * LOG2_10) + 2048UL;
+              unsigned long out_digits_ul = min(digits, OUTPUT_LIMIT_DIGITS);
+              mp_bitcnt_t out_prec = static_cast<mp_bitcnt_t>((static_cast<long double>(out_digits_ul) + 256.0L) * LOG2_10) + 2048UL;
 
               mpf_t sqrt10005, C, qf, tf, pi;
-              mpf_init2(sqrt10005, prec);
-              mpf_init2(C, prec);
-              mpf_init2(qf, prec);
-              mpf_init2(tf, prec);
-              mpf_init2(pi, prec);
+              mpf_init2(sqrt10005, out_prec);
+              mpf_init2(C, out_prec);
+              mpf_init2(qf, out_prec);
+              mpf_init2(tf, out_prec);
+              mpf_init2(pi, out_prec);
 
               mpf_set_ui(sqrt10005, 10005UL);
               mpf_sqrt(sqrt10005, sqrt10005);
@@ -264,7 +265,6 @@ jobs:
               if (!fp) return 1;
               setvbuf(fp, nullptr, _IOFBF, 1 << 20);
 
-              unsigned long out_digits_ul = min(digits, OUTPUT_LIMIT_DIGITS);
               int out_digits = (out_digits_ul > static_cast<unsigned long>(INT_MAX - 1))
                   ? (INT_MAX - 1)
                   : static_cast<int>(out_digits_ul);
