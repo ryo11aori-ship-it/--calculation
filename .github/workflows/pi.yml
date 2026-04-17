@@ -13,79 +13,115 @@ jobs:
       - name: Create_Code
         run: |
           cat << 'EOF' > main.cpp
-          #include <array>
           #include <algorithm>
+          #include <array>
           #include <chrono>
           #include <climits>
-          #include <cmath>
           #include <cstdio>
-          #include <future>
-          #include <gmpxx.h>
+          #include <gmp.h>
           #include <iostream>
           #include <optional>
           #include <thread>
           #include <utility>
-          #include <vector>
 
           using namespace std;
 
           static constexpr unsigned long LIMIT_SEC = 55;
-          static constexpr unsigned long CHUNK = 512;
-          static constexpr unsigned long LEAF = 32;
+          static constexpr unsigned long CHUNK = 2048;
+          static constexpr unsigned long LEAF = 64;
           static constexpr unsigned long BLOCKS_PER_TASK = 4;
 
-          static constexpr long A = 13591409;
-          static constexpr long B = 545140134;
-          static constexpr unsigned long C3_OVER_24 = 10939058860032000UL;
+          static constexpr unsigned long long A = 13591409ULL;
+          static constexpr unsigned long long B = 545140134ULL;
+          static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
           static constexpr long double LOG2_10 = 3.32192809488736234787L;
 
-          struct BS {
-              mpz_class P;
-              mpz_class Q;
-              mpz_class T;
-          };
+          struct Mpz {
+              mpz_t v;
 
-          static inline BS combine(const BS& left, const BS& right) {
-              BS out;
-              mpz_mul(out.P.get_mpz_t(), left.P.get_mpz_t(), right.P.get_mpz_t());
-              mpz_mul(out.Q.get_mpz_t(), left.Q.get_mpz_t(), right.Q.get_mpz_t());
+              Mpz() { mpz_init(v); }
+              explicit Mpz(unsigned long x) { mpz_init_set_ui(v, x); }
+              Mpz(const Mpz& other) { mpz_init_set(v, other.v); }
+              Mpz(Mpz&& other) noexcept {
+                  mpz_init(v);
+                  mpz_swap(v, other.v);
+              }
+              ~Mpz() { mpz_clear(v); }
 
-              mpz_mul(out.T.get_mpz_t(), left.T.get_mpz_t(), right.Q.get_mpz_t());
-              mpz_addmul(out.T.get_mpz_t(), right.T.get_mpz_t(), left.P.get_mpz_t());
-              return out;
-          }
-
-          static inline BS term_at(unsigned long k) {
-              if (k == 0) {
-                  return BS{1, 1, A};
+              Mpz& operator=(Mpz other) noexcept {
+                  swap(other);
+                  return *this;
               }
 
-              mpz_class p = 6UL * k - 5;
-              p *= (2UL * k - 1);
-              p *= (6UL * k - 1);
+              void swap(Mpz& other) noexcept {
+                  mpz_swap(v, other.v);
+              }
 
-              mpz_class q = k;
-              q *= k;
-              q *= k;
-              q *= C3_OVER_24;
+              mpz_ptr get() { return v; }
+              mpz_srcptr get() const { return v; }
+          };
 
-              mpz_class t = p;
-              t *= (A + B * static_cast<long>(k));
-              if (k & 1UL) t = -t;
+          struct BS {
+              Mpz P;
+              Mpz Q;
+              Mpz T;
 
-              return BS{std::move(p), std::move(q), std::move(t)};
+              void swap(BS& other) noexcept {
+                  P.swap(other.P);
+                  Q.swap(other.Q);
+                  T.swap(other.T);
+              }
+          };
+
+          static inline void combine_into(BS& out, const BS& left, const BS& right) {
+              mpz_mul(out.P.get(), left.P.get(), right.P.get());
+              mpz_mul(out.Q.get(), left.Q.get(), right.Q.get());
+
+              mpz_mul(out.T.get(), left.T.get(), right.Q.get());
+              mpz_addmul(out.T.get(), right.T.get(), left.P.get());
+          }
+
+          static inline void term_into(BS& out, unsigned long k) {
+              if (k == 0) {
+                  mpz_set_ui(out.P.get(), 1UL);
+                  mpz_set_ui(out.Q.get(), 1UL);
+                  mpz_set_ui(out.T.get(), static_cast<unsigned long>(A));
+                  return;
+              }
+
+              mpz_set_ui(out.P.get(), 6UL * k - 5UL);
+              mpz_mul_ui(out.P.get(), out.P.get(), 2UL * k - 1UL);
+              mpz_mul_ui(out.P.get(), out.P.get(), 6UL * k - 1UL);
+
+              mpz_set_ui(out.Q.get(), k);
+              mpz_mul_ui(out.Q.get(), out.Q.get(), k);
+              mpz_mul_ui(out.Q.get(), out.Q.get(), k);
+              mpz_mul_ui(out.Q.get(), out.Q.get(), static_cast<unsigned long>(C3_OVER_24));
+
+              mpz_set(out.T.get(), out.P.get());
+              mpz_mul_ui(out.T.get(), out.T.get(), static_cast<unsigned long>(A + B * k));
+              if (k & 1UL) {
+                  mpz_neg(out.T.get(), out.T.get());
+              }
           }
 
           static BS bs(unsigned long a, unsigned long b) {
               if (b - a == 1) {
-                  return term_at(a);
+                  BS r;
+                  term_into(r, a);
+                  return r;
               }
 
               if (b - a <= LEAF) {
-                  BS r = term_at(a);
+                  BS r;
+                  term_into(r, a);
                   for (unsigned long k = a + 1; k < b; ++k) {
-                      r = combine(r, term_at(k));
+                      BS t;
+                      term_into(t, k);
+                      BS tmp;
+                      combine_into(tmp, r, t);
+                      r.swap(tmp);
                   }
                   return r;
               }
@@ -93,22 +129,17 @@ jobs:
               unsigned long m = a + ((b - a) >> 1);
               BS left = bs(a, m);
               BS right = bs(m, b);
-              return combine(left, right);
-          }
-
-          static BS compute_range(unsigned long a, unsigned long b) {
-              BS acc = bs(a, min(a + CHUNK, b));
-              for (unsigned long s = a + CHUNK; s < b; s += CHUNK) {
-                  unsigned long e = min(s + CHUNK, b);
-                  acc = combine(acc, bs(s, e));
-              }
-              return acc;
+              BS out;
+              combine_into(out, left, right);
+              return out;
           }
 
           int main() {
               auto start = chrono::steady_clock::now();
 
-              BS head = term_at(0);
+              BS head;
+              term_into(head, 0);
+
               unsigned long terms = 1;
 
               array<optional<BS>, 64> bins;
@@ -127,15 +158,20 @@ jobs:
                           max_level = max(max_level, level);
                           return;
                       }
-                      part = combine(*bins[level], part);
+                      BS tmp;
+                      combine_into(tmp, *bins[level], part);
                       bins[level].reset();
+                      part.swap(tmp);
                       ++level;
                   }
               };
 
-              unsigned hw = thread::hardware_concurrency();
-              if (hw == 0) hw = 1;
-              hw = min(hw, 4u);
+              unsigned workers = thread::hardware_concurrency();
+              if (workers == 0) workers = 1;
+              workers = min(workers, 4u);
+
+              array<BS, 4> partials;
+              array<thread, 4> threads;
 
               while (true) {
                   auto now = chrono::steady_clock::now();
@@ -143,54 +179,83 @@ jobs:
                       break;
                   }
 
-                  vector<future<BS>> futs;
-                  futs.reserve(hw);
-
-                  unsigned long batch_start = terms;
                   unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
+                  unsigned long batch_terms = task_span * workers;
 
-                  for (unsigned t = 0; t < hw; ++t) {
-                      unsigned long a = batch_start + static_cast<unsigned long>(t) * task_span;
+                  for (unsigned i = 0; i < workers; ++i) {
+                      unsigned long a = terms + static_cast<unsigned long>(i) * task_span;
                       unsigned long b = a + task_span;
-                      futs.emplace_back(async(launch::async, [a, b]() {
-                          return compute_range(a, b);
-                      }));
+
+                      if (workers == 1) {
+                          partials[0] = bs(a, b);
+                      } else {
+                          threads[i] = thread([&, i, a, b]() {
+                              partials[i] = bs(a, b);
+                          });
+                      }
                   }
 
-                  terms = batch_start + static_cast<unsigned long>(hw) * task_span;
-
-                  for (auto& f : futs) {
-                      push_part(f.get());
+                  if (workers != 1) {
+                      for (unsigned i = 0; i < workers; ++i) {
+                          threads[i].join();
+                      }
                   }
+
+                  BS batch_part = std::move(partials[0]);
+                  for (unsigned i = 1; i < workers; ++i) {
+                      BS tmp;
+                      combine_into(tmp, batch_part, partials[i]);
+                      batch_part.swap(tmp);
+                  }
+
+                  push_part(std::move(batch_part));
+                  terms += batch_terms;
               }
 
               BS tail;
               bool have_tail = false;
-
               for (int i = static_cast<int>(max_level); i >= 0; --i) {
                   if (!bins[i].has_value()) continue;
                   if (!have_tail) {
                       tail = std::move(*bins[i]);
                       have_tail = true;
                   } else {
-                      tail = combine(tail, *bins[i]);
+                      BS tmp;
+                      combine_into(tmp, tail, *bins[i]);
+                      tail.swap(tmp);
                   }
               }
 
-              BS total = have_tail ? combine(head, tail) : head;
+              BS total;
+              if (have_tail) {
+                  combine_into(total, head, tail);
+              } else {
+                  total = std::move(head);
+              }
 
               long double estimated_digits = static_cast<long double>(terms) * DIGITS_PER_TERM;
               unsigned long digits = estimated_digits > 16.0L
                   ? static_cast<unsigned long>(estimated_digits) - 4UL
                   : static_cast<unsigned long>(estimated_digits);
 
-              mp_bitcnt_t bits = static_cast<mp_bitcnt_t>((static_cast<long double>(digits) + 256.0L) * LOG2_10);
-              mpf_set_default_prec(bits);
+              mp_bitcnt_t prec = static_cast<mp_bitcnt_t>((static_cast<long double>(digits) + 256.0L) * LOG2_10) + 1024UL;
 
-              mpf_class sqrt10005(10005);
-              sqrt10005 = sqrt(sqrt10005);
-              mpf_class C = sqrt10005 * 426880;
-              mpf_class pi = (C * total.Q) / total.T;
+              mpf_t sqrt10005, C, qf, tf, pi;
+              mpf_init2(sqrt10005, prec);
+              mpf_init2(C, prec);
+              mpf_init2(qf, prec);
+              mpf_init2(tf, prec);
+              mpf_init2(pi, prec);
+
+              mpf_set_ui(sqrt10005, 10005UL);
+              mpf_sqrt(sqrt10005, sqrt10005);
+              mpf_mul_ui(C, sqrt10005, 426880UL);
+
+              mpf_set_z(qf, total.Q.get());
+              mpf_set_z(tf, total.T.get());
+
+              mpf_mul(pi, C, qf);
+              mpf_div(pi, pi, tf);
 
               FILE* fp = fopen("pi.txt", "w");
               if (!fp) return 1;
@@ -200,16 +265,23 @@ jobs:
                   ? (INT_MAX - 1)
                   : static_cast<int>(digits);
 
-              gmp_fprintf(fp, "%.*Ff\n", out_digits, pi.get_mpf_t());
+              gmp_fprintf(fp, "%.*Ff\n", out_digits, pi);
               fclose(fp);
 
               cout << out_digits << "桁" << endl;
+
+              mpf_clear(pi);
+              mpf_clear(tf);
+              mpf_clear(qf);
+              mpf_clear(C);
+              mpf_clear(sqrt10005);
+
               return 0;
           }
           EOF
 
       - name: Compile
-        run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmpxx -lgmp -o pi
+        run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmp -o pi
 
       - name: Run
         run: ./pi
