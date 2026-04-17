@@ -1,0 +1,62 @@
+name: Calculate_Pi
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  run-pi:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install_Dependencies
+      run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+    - name: Create_Code
+      run: |
+        cat << 'EOF' > main.cpp
+        #include<iostream>
+        #include<fstream>
+        #include<chrono>
+        #include<gmp.h>
+        #include<gmpxx.h>
+        using namespace std;
+        int main(){
+        mpf_set_default_prec(33219280);
+        mpz_class M=1;
+        mpz_class L=13591409;
+        mpz_class X=1;
+        mpz_class K=6;
+        mpz_class k=0;
+        mpf_class S=13591409;
+        mpz_class X_step("-262537412640768000");
+        auto start=chrono::steady_clock::now();
+        while(true){
+        auto now=chrono::steady_clock::now();
+        if(chrono::duration_cast<chrono::seconds>(now-start).count()>=55)break;
+        k++;
+        M=(K*K*K-16*K)*M/(k*k*k);
+        L+=545140134;
+        X*=X_step;
+        mpf_class term(M*L);
+        term/=X;
+        S+=term;
+        K+=12;
+        }
+        mpf_class pi;
+        mpf_class C=10005;
+        C=sqrt(C)*426880;
+        pi=C/S;
+        int digits=k.get_si()*14;
+        FILE* fp=fopen("pi.txt","w");
+        gmp_fprintf(fp,"%.*Ff\n",digits,pi.get_mpf_t());
+        fclose(fp);
+        cout<<digits<<"桁"<<endl;
+        return 0;
+        }
+        EOF
+    - name: Compile
+      run: g++ -O3 main.cpp -lgmpxx -lgmp
+    - name: Run
+      run: ./a.out
+    - name: Upload_Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: pi_result
+        path: pi.txt
