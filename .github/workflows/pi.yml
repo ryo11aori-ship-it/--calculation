@@ -15,6 +15,7 @@ jobs:
           cat << 'EOF' > main.cpp
           #include <algorithm>
           #include <array>
+          #include <atomic>
           #include <chrono>
           #include <climits>
           #include <cstdio>
@@ -23,12 +24,13 @@ jobs:
           #include <optional>
           #include <thread>
           #include <utility>
+          #include <vector>
 
           using namespace std;
 
           static constexpr unsigned long LIMIT_SEC = 55;
-          static constexpr unsigned long CHUNK = 2048;
-          static constexpr unsigned long LEAF = 64;
+          static constexpr unsigned long CHUNK = 4096;
+          static constexpr unsigned long LEAF = 128;
           static constexpr unsigned long BLOCKS_PER_TASK = 4;
 
           static constexpr unsigned long long A = 13591409ULL;
@@ -74,6 +76,11 @@ jobs:
               }
           };
 
+          struct Block {
+              unsigned long begin;
+              BS value;
+          };
+
           static inline void combine_into(BS& out, const BS& left, const BS& right) {
               mpz_mul(out.P.get(), left.P.get(), right.P.get());
               mpz_mul(out.Q.get(), left.Q.get(), right.Q.get());
@@ -101,9 +108,7 @@ jobs:
 
               mpz_set(out.T.get(), out.P.get());
               mpz_mul_ui(out.T.get(), out.T.get(), static_cast<unsigned long>(A + B * k));
-              if (k & 1UL) {
-                  mpz_neg(out.T.get(), out.T.get());
-              }
+              if (k & 1UL) mpz_neg(out.T.get(), out.T.get());
           }
 
           static BS bs(unsigned long a, unsigned long b) {
@@ -134,82 +139,76 @@ jobs:
               return out;
           }
 
+          static void push_part(array<optional<BS>, 64>& bins, size_t& max_level, BS part) {
+              size_t level = 0;
+              while (true) {
+                  if (level >= bins.size()) {
+                      bins[bins.size() - 1] = std::move(part);
+                      max_level = max(max_level, bins.size() - 1);
+                      return;
+                  }
+                  if (!bins[level].has_value()) {
+                      bins[level].emplace(std::move(part));
+                      max_level = max(max_level, level);
+                      return;
+                  }
+                  BS tmp;
+                  combine_into(tmp, *bins[level], part);
+                  bins[level].reset();
+                  part.swap(tmp);
+                  ++level;
+              }
+          }
+
           int main() {
               auto start = chrono::steady_clock::now();
 
               BS head;
               term_into(head, 0);
 
-              unsigned long terms = 1;
+              atomic<unsigned long> next_term{1};
+              const unsigned workers = max(1u, min(thread::hardware_concurrency() == 0 ? 1u : thread::hardware_concurrency(), 4u));
+              const unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
+
+              vector<vector<Block>> local_blocks(workers);
+              vector<thread> threads;
+              threads.reserve(workers);
+
+              for (unsigned tid = 0; tid < workers; ++tid) {
+                  local_blocks[tid].reserve(256);
+                  threads.emplace_back([&, tid]() {
+                      while (true) {
+                          auto now = chrono::steady_clock::now();
+                          if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) {
+                              break;
+                          }
+
+                          unsigned long a = next_term.fetch_add(task_span, memory_order_relaxed);
+                          BS value = bs(a, a + task_span);
+                          local_blocks[tid].push_back(Block{a, std::move(value)});
+                      }
+                  });
+              }
+
+              for (auto& th : threads) th.join();
+
+              vector<Block> blocks;
+              size_t total_blocks = 0;
+              for (auto& v : local_blocks) total_blocks += v.size();
+              blocks.reserve(total_blocks);
+
+              for (auto& v : local_blocks) {
+                  for (auto& b : v) blocks.push_back(std::move(b));
+              }
+
+              sort(blocks.begin(), blocks.end(),
+                   [](const Block& x, const Block& y) { return x.begin < y.begin; });
 
               array<optional<BS>, 64> bins;
               size_t max_level = 0;
 
-              auto push_part = [&](BS part) {
-                  size_t level = 0;
-                  while (true) {
-                      if (level >= bins.size()) {
-                          bins[bins.size() - 1] = std::move(part);
-                          max_level = max(max_level, bins.size() - 1);
-                          return;
-                      }
-                      if (!bins[level].has_value()) {
-                          bins[level].emplace(std::move(part));
-                          max_level = max(max_level, level);
-                          return;
-                      }
-                      BS tmp;
-                      combine_into(tmp, *bins[level], part);
-                      bins[level].reset();
-                      part.swap(tmp);
-                      ++level;
-                  }
-              };
-
-              unsigned workers = thread::hardware_concurrency();
-              if (workers == 0) workers = 1;
-              workers = min(workers, 4u);
-
-              array<BS, 4> partials;
-              array<thread, 4> threads;
-
-              while (true) {
-                  auto now = chrono::steady_clock::now();
-                  if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) {
-                      break;
-                  }
-
-                  unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
-                  unsigned long batch_terms = task_span * workers;
-
-                  for (unsigned i = 0; i < workers; ++i) {
-                      unsigned long a = terms + static_cast<unsigned long>(i) * task_span;
-                      unsigned long b = a + task_span;
-
-                      if (workers == 1) {
-                          partials[0] = bs(a, b);
-                      } else {
-                          threads[i] = thread([&, i, a, b]() {
-                              partials[i] = bs(a, b);
-                          });
-                      }
-                  }
-
-                  if (workers != 1) {
-                      for (unsigned i = 0; i < workers; ++i) {
-                          threads[i].join();
-                      }
-                  }
-
-                  BS batch_part = std::move(partials[0]);
-                  for (unsigned i = 1; i < workers; ++i) {
-                      BS tmp;
-                      combine_into(tmp, batch_part, partials[i]);
-                      batch_part.swap(tmp);
-                  }
-
-                  push_part(std::move(batch_part));
-                  terms += batch_terms;
+              for (auto& blk : blocks) {
+                  push_part(bins, max_level, std::move(blk.value));
               }
 
               BS tail;
@@ -233,12 +232,15 @@ jobs:
                   total = std::move(head);
               }
 
+              unsigned long terms = next_term.load(memory_order_relaxed);
+              if (terms == 0) terms = 1;
+
               long double estimated_digits = static_cast<long double>(terms) * DIGITS_PER_TERM;
               unsigned long digits = estimated_digits > 16.0L
-                  ? static_cast<unsigned long>(estimated_digits) - 4UL
+                  ? static_cast<unsigned long>(estimated_digits) - 8UL
                   : static_cast<unsigned long>(estimated_digits);
 
-              mp_bitcnt_t prec = static_cast<mp_bitcnt_t>((static_cast<long double>(digits) + 256.0L) * LOG2_10) + 1024UL;
+              mp_bitcnt_t prec = static_cast<mp_bitcnt_t>((static_cast<long double>(digits) + 256.0L) * LOG2_10) + 2048UL;
 
               mpf_t sqrt10005, C, qf, tf, pi;
               mpf_init2(sqrt10005, prec);
