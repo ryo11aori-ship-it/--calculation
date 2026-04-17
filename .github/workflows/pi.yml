@@ -14,25 +14,31 @@ jobs:
         run: |
           cat << 'EOF' > main.cpp
           #include <array>
+          #include <algorithm>
           #include <chrono>
           #include <climits>
           #include <cmath>
           #include <cstdio>
+          #include <future>
           #include <gmpxx.h>
           #include <iostream>
           #include <optional>
+          #include <thread>
           #include <utility>
+          #include <vector>
 
           using namespace std;
 
           static constexpr unsigned long LIMIT_SEC = 55;
-          static constexpr unsigned long CHUNK = 64;
-          static constexpr unsigned long LEAF = 16;
+          static constexpr unsigned long CHUNK = 512;
+          static constexpr unsigned long LEAF = 32;
+          static constexpr unsigned long BLOCKS_PER_TASK = 4;
 
           static constexpr long A = 13591409;
           static constexpr long B = 545140134;
           static constexpr unsigned long C3_OVER_24 = 10939058860032000UL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
+          static constexpr long double LOG2_10 = 3.32192809488736234787L;
 
           struct BS {
               mpz_class P;
@@ -55,11 +61,19 @@ jobs:
                   return BS{1, 1, A};
               }
 
-              mpz_class kk = k;
-              mpz_class p = (6 * kk - 5) * (2 * kk - 1) * (6 * kk - 1);
-              mpz_class q = kk * kk * kk * C3_OVER_24;
-              mpz_class t = p * (A + B * kk);
+              mpz_class p = 6UL * k - 5;
+              p *= (2UL * k - 1);
+              p *= (6UL * k - 1);
+
+              mpz_class q = k;
+              q *= k;
+              q *= k;
+              q *= C3_OVER_24;
+
+              mpz_class t = p;
+              t *= (A + B * static_cast<long>(k));
               if (k & 1UL) t = -t;
+
               return BS{std::move(p), std::move(q), std::move(t)};
           }
 
@@ -76,16 +90,24 @@ jobs:
                   return r;
               }
 
-              unsigned long m = (a + b) >> 1;
+              unsigned long m = a + ((b - a) >> 1);
               BS left = bs(a, m);
               BS right = bs(m, b);
               return combine(left, right);
           }
 
+          static BS compute_range(unsigned long a, unsigned long b) {
+              BS acc = bs(a, min(a + CHUNK, b));
+              for (unsigned long s = a + CHUNK; s < b; s += CHUNK) {
+                  unsigned long e = min(s + CHUNK, b);
+                  acc = combine(acc, bs(s, e));
+              }
+              return acc;
+          }
+
           int main() {
               auto start = chrono::steady_clock::now();
 
-              // 最初の 1 項だけは別に保持し、以降を平衡スタックでまとめる
               BS head = term_at(0);
               unsigned long terms = 1;
 
@@ -97,12 +119,12 @@ jobs:
                   while (true) {
                       if (level >= bins.size()) {
                           bins[bins.size() - 1] = std::move(part);
-                          if (bins.size() - 1 > max_level) max_level = bins.size() - 1;
+                          max_level = max(max_level, bins.size() - 1);
                           return;
                       }
                       if (!bins[level].has_value()) {
                           bins[level].emplace(std::move(part));
-                          if (level > max_level) max_level = level;
+                          max_level = max(max_level, level);
                           return;
                       }
                       part = combine(*bins[level], part);
@@ -111,16 +133,35 @@ jobs:
                   }
               };
 
+              unsigned hw = thread::hardware_concurrency();
+              if (hw == 0) hw = 1;
+              hw = min(hw, 4u);
+
               while (true) {
                   auto now = chrono::steady_clock::now();
                   if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) {
                       break;
                   }
 
-                  unsigned long next = terms + CHUNK;
-                  BS part = bs(terms, next);
-                  push_part(std::move(part));
-                  terms = next;
+                  vector<future<BS>> futs;
+                  futs.reserve(hw);
+
+                  unsigned long batch_start = terms;
+                  unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
+
+                  for (unsigned t = 0; t < hw; ++t) {
+                      unsigned long a = batch_start + static_cast<unsigned long>(t) * task_span;
+                      unsigned long b = a + task_span;
+                      futs.emplace_back(async(launch::async, [a, b]() {
+                          return compute_range(a, b);
+                      }));
+                  }
+
+                  terms = batch_start + static_cast<unsigned long>(hw) * task_span;
+
+                  for (auto& f : futs) {
+                      push_part(f.get());
+                  }
               }
 
               BS tail;
@@ -143,7 +184,7 @@ jobs:
                   ? static_cast<unsigned long>(estimated_digits) - 4UL
                   : static_cast<unsigned long>(estimated_digits);
 
-              mp_bitcnt_t bits = static_cast<mp_bitcnt_t>(digits * 3.3219280948873626L + 32768.0L);
+              mp_bitcnt_t bits = static_cast<mp_bitcnt_t>((static_cast<long double>(digits) + 256.0L) * LOG2_10);
               mpf_set_default_prec(bits);
 
               mpf_class sqrt10005(10005);
@@ -168,7 +209,7 @@ jobs:
           EOF
 
       - name: Compile
-        run: g++ -O3 -march=native -flto -pipe -DNDEBUG -std=c++17 main.cpp -lgmpxx -lgmp -o pi
+        run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmpxx -lgmp -o pi
 
       - name: Run
         run: ./pi
