@@ -1,4 +1,4 @@
-name: Calculate_Pi_Optimized
+name: Calculate_Pi_Maxed
 on:
   push:
   workflow_dispatch:
@@ -17,13 +17,18 @@ jobs:
           #include <climits>
           #include <cmath>
           #include <cstdio>
+          #include <future>
           #include <gmpxx.h>
           #include <iostream>
+          #include <thread>
 
           using namespace std;
 
-          static constexpr unsigned long BLOCK = 16;
-          static constexpr long LIMIT_SEC = 55;
+          static constexpr unsigned long LIMIT_SEC = 55;
+          static constexpr unsigned long LEAF = 32;
+          static constexpr unsigned long CHUNK = 128;
+          static constexpr unsigned ASYNC_DEPTH = 3;
+
           static constexpr long A = 13591409;
           static constexpr long B = 545140134;
           static constexpr unsigned long C3_OVER_24 = 10939058860032000UL;
@@ -43,30 +48,54 @@ jobs:
               return out;
           }
 
-          static BS bs(unsigned long a, unsigned long b) {
+          static inline BS term_at(unsigned long k) {
+              if (k == 0) {
+                  return {1, 1, A};
+              }
+
+              mpz_class kk = k;
+              mpz_class p = (6 * kk - 5) * (2 * kk - 1) * (6 * kk - 1);
+              mpz_class q = kk * kk * kk * C3_OVER_24;
+              mpz_class t = p * (A + B * kk);
+              if (k & 1UL) t = -t;
+              return {p, q, t};
+          }
+
+          static BS bs(unsigned long a, unsigned long b, unsigned depth = 0) {
               if (b - a == 1) {
-                  if (a == 0) {
-                      return {1, 1, A};
+                  return term_at(a);
+              }
+
+              if (b - a <= LEAF) {
+                  BS r = term_at(a);
+                  for (unsigned long k = a + 1; k < b; ++k) {
+                      r = combine(r, term_at(k));
                   }
-                  mpz_class k = a;
-                  mpz_class p = (6 * k - 5) * (2 * k - 1) * (6 * k - 1);
-                  mpz_class q = k * k * k * C3_OVER_24;
-                  mpz_class t = p * (A + B * k);
-                  if (a & 1UL) t = -t;
-                  return {p, q, t};
+                  return r;
               }
 
               unsigned long m = (a + b) >> 1;
-              BS left = bs(a, m);
-              BS right = bs(m, b);
+
+              if (depth < ASYNC_DEPTH) {
+                  auto fut = async(launch::async, [=]() {
+                      return bs(a, m, depth + 1);
+                  });
+                  BS right = bs(m, b, depth + 1);
+                  BS left = fut.get();
+                  return combine(left, right);
+              }
+
+              BS left = bs(a, m, depth + 1);
+              BS right = bs(m, b, depth + 1);
               return combine(left, right);
           }
 
           int main() {
               auto start = chrono::steady_clock::now();
 
-              BS acc = bs(0, 1);   // k = 0 の初期項
+              BS acc = term_at(0);
               unsigned long terms = 1;
+              unsigned long chunk = CHUNK;
 
               while (true) {
                   auto now = chrono::steady_clock::now();
@@ -74,18 +103,24 @@ jobs:
                       break;
                   }
 
-                  unsigned long next = terms + BLOCK;
-                  BS chunk = bs(terms, next);
-                  acc = combine(acc, chunk);
+                  unsigned long next = terms + chunk;
+                  BS part = bs(terms, next);
+                  acc = combine(acc, part);
                   terms = next;
+
+                  // 進み具合に応じて少しだけ塊を大きくする
+                  if (terms < 2048) chunk = 128;
+                  else if (terms < 16384) chunk = 256;
+                  else if (terms < 65536) chunk = 512;
+                  else chunk = 1024;
               }
 
-              // 収束速度から出力桁数を見積もる
-              unsigned long digits = static_cast<unsigned long>(terms * DIGITS_PER_TERM);
-              if (digits > 16) digits -= 4;
+              long double estimated = static_cast<long double>(terms) * DIGITS_PER_TERM;
+              unsigned long digits = (estimated > 16.0L)
+                  ? static_cast<unsigned long>(estimated) - 4UL
+                  : static_cast<unsigned long>(estimated);
 
-              // 最終段だけ高精度浮動小数にする
-              mp_bitcnt_t bits = static_cast<mp_bitcnt_t>(digits * 332193ULL / 100000ULL + 4096ULL);
+              mp_bitcnt_t bits = static_cast<mp_bitcnt_t>(digits * 3.3219280948873626L + 4096.0L);
               mpf_set_default_prec(bits);
 
               mpf_class sqrt10005(10005);
@@ -97,8 +132,8 @@ jobs:
               if (!fp) return 1;
 
               int out_digits = (digits > static_cast<unsigned long>(INT_MAX - 1))
-                               ? (INT_MAX - 1)
-                               : static_cast<int>(digits);
+                  ? (INT_MAX - 1)
+                  : static_cast<int>(digits);
 
               gmp_fprintf(fp, "%.*Ff\n", out_digits, pi.get_mpf_t());
               fclose(fp);
@@ -109,7 +144,7 @@ jobs:
           EOF
 
       - name: Compile
-        run: g++ -O3 -march=native -flto -pipe -DNDEBUG -std=c++17 main.cpp -lgmpxx -lgmp -o pi
+        run: g++ -O3 -flto -pipe -DNDEBUG -std=c++17 main.cpp -lgmpxx -lgmp -pthread -o pi
 
       - name: Run
         run: ./pi
