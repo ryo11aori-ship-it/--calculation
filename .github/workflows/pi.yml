@@ -13,113 +13,141 @@ jobs:
       - name: Create_Code
         run: |
           cat << 'EOF' > main.cpp
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <gmp.h>
-#include <iostream>
-#include <thread>
-#include <vector>
-using namespace std;
-static constexpr unsigned long LIMIT_SEC = 55;
-static constexpr unsigned long CHUNK = 65536;
-static constexpr unsigned long long A = 13591409ULL;
-static constexpr unsigned long long B = 545140134ULL;
-static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
-static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
-struct Mpz {
-mpz_t v;
-Mpz() { mpz_init(v); }
-~Mpz() { mpz_clear(v); }
-Mpz(const Mpz&) = delete;
-Mpz& operator=(const Mpz&) = delete;
-void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
-mpz_ptr get() { return v; }
-mpz_srcptr get() const { return v; }
-};
-struct BS {
-Mpz P, Q, T;
-void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
-};
-static inline void combine_into_left(BS& L, const BS& R, Mpz& tmp) {
-mpz_mul(tmp.get(), R.T.get(), L.P.get());
-mpz_mul(L.T.get(), L.T.get(), R.Q.get());
-mpz_add(L.T.get(), L.T.get(), tmp.get());
-mpz_mul(L.P.get(), L.P.get(), R.P.get());
-mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
-}
-static inline void term_into(BS& o, unsigned long k) {
-if (k == 0) {
-mpz_set_ui(o.P.get(), 1);
-mpz_set_ui(o.Q.get(), 1);
-mpz_set_ui(o.T.get(), A);
-return;
-}
-mpz_set_ui(o.P.get(), 6*k-5);
-mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
-mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
-mpz_set_ui(o.Q.get(), k);
-mpz_mul_ui(o.Q.get(), o.Q.get(), k);
-mpz_mul_ui(o.Q.get(), o.Q.get(), k);
-mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
-mpz_set(o.T.get(), o.P.get());
-mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
-if (k & 1) mpz_neg(o.T.get(), o.T.get());
-}
-struct Workspace {
-array<BS, 64> W;
-Mpz tmp;
-};
-static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
-if (b - a == 1) { term_into(L, a); return; }
-unsigned long m = (a + b) >> 1;
-bs(a, m, L, ws, depth + 1);
-bs(m, b, ws.W[depth], ws, depth + 1);
-combine_into_left(L, ws.W[depth], ws.tmp);
-}
-atomic<unsigned long> next_chunk{0};
-int main() {
-auto start = chrono::steady_clock::now();
-auto deadline = start + chrono::seconds(LIMIT_SEC);
-const unsigned workers = max(1u, min(thread::hardware_concurrency() ? thread::hardware_concurrency() : 1u, 4u));
-vector<BS> global_blocks(4096);
-vector<thread> ths;
-for (unsigned t = 0; t < workers; ++t) {
-ths.emplace_back([&]() {
-Workspace ws;
-while (chrono::steady_clock::now() < deadline) {
-unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
-if (cid >= global_blocks.size()) break;
-unsigned long a = 1 + cid * CHUNK;
-unsigned long b = 1 + (cid + 1) * CHUNK;
-bs(a, b, global_blocks[cid], ws, 0);
-}
-});
-}
-for (auto& th : ths) th.join();
-unsigned long total_chunks = next_chunk.load();
-if (total_chunks > global_blocks.size()) total_chunks = global_blocks.size();
-unsigned long active_chunks = total_chunks;
-Mpz global_tmp;
-while (active_chunks > 1) {
-unsigned long next_active = 0;
-for (unsigned long i = 0; i < active_chunks; i += 2) {
-if (i + 1 < active_chunks) {
-combine_into_left(global_blocks[i], global_blocks[i+1], global_tmp);
-}
-if (next_active != i) {
-global_blocks[next_active].swap(global_blocks[i]);
-}
-next_active++;
-}
-active_chunks = next_active;
-}
-unsigned long terms = total_chunks * CHUNK;
-long double digits = (long double)terms * DIGITS_PER_TERM;
-cout << (unsigned long)(digits - 8) << "桁" << endl;
-return 0;
-}
-EOF
+          #include <array>
+          #include <atomic>
+          #include <chrono>
+          #include <gmp.h>
+          #include <iostream>
+          #include <thread>
+          #include <vector>
+          using namespace std;
+          
+          static constexpr unsigned long LIMIT_SEC = 55;
+          static constexpr unsigned long CHUNK = 4096; // L2/L3キャッシュに完全に収まり、かつロック競合も起きない最適値
+          static constexpr unsigned long long A = 13591409ULL;
+          static constexpr unsigned long long B = 545140134ULL;
+          static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
+          static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
+          
+          struct Mpz {
+              mpz_t v;
+              Mpz() { mpz_init(v); }
+              ~Mpz() { mpz_clear(v); }
+              Mpz(const Mpz&) = delete;
+              Mpz& operator=(const Mpz&) = delete;
+              void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
+              mpz_ptr get() { return v; }
+              mpz_srcptr get() const { return v; }
+          };
+          
+          struct BS {
+              Mpz P, Q, T;
+              void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
+          };
+          
+          static inline void combine_into_left(BS& L, const BS& R, Mpz& tmp) {
+              mpz_mul(tmp.get(), R.T.get(), L.P.get());
+              mpz_mul(L.T.get(), L.T.get(), R.Q.get());
+              mpz_add(L.T.get(), L.T.get(), tmp.get());
+              
+              mpz_mul(L.P.get(), L.P.get(), R.P.get());
+              mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
+          }
+          
+          static inline void term_into(BS& o, unsigned long k) {
+              if (k == 0) {
+                  mpz_set_ui(o.P.get(), 1);
+                  mpz_set_ui(o.Q.get(), 1);
+                  mpz_set_ui(o.T.get(), A);
+                  return;
+              }
+              mpz_set_ui(o.P.get(), 6*k-5);
+              mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
+              mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
+              
+              mpz_set_ui(o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
+              
+              mpz_set(o.T.get(), o.P.get());
+              mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
+              if (k & 1) mpz_neg(o.T.get(), o.T.get());
+          }
+          
+          struct Workspace {
+              array<BS, 64> W;
+              Mpz tmp;
+          };
+          
+          static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
+              if (b - a == 1) { term_into(L, a); return; }
+              unsigned long m = (a + b) >> 1;
+              bs(a, m, L, ws, depth + 1);
+              bs(m, b, ws.W[depth], ws, depth + 1);
+              combine_into_left(L, ws.W[depth], ws.tmp);
+          }
+          
+          atomic<unsigned long> next_chunk{0};
+          
+          int main() {
+              auto start = chrono::steady_clock::now();
+              auto deadline = start + chrono::seconds(LIMIT_SEC);
+              const unsigned workers = max(1u, min(thread::hardware_concurrency() ? thread::hardware_concurrency() : 1u, 4u));
+              
+              // 余裕を持たせたバッファ（最大で約3300万項 = 4.7億桁分まで対応可能）
+              vector<BS> global_blocks(8192); 
+              vector<thread> ths;
+              
+              for (unsigned t = 0; t < workers; ++t) {
+                  ths.emplace_back([&]() {
+                      Workspace ws;
+                      while (chrono::steady_clock::now() < deadline) {
+                          unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
+                          if (cid >= global_blocks.size()) break;
+                          
+                          unsigned long a = 1 + cid * CHUNK;
+                          unsigned long b = 1 + (cid + 1) * CHUNK;
+                          bs(a, b, global_blocks[cid], ws, 0);
+                      }
+                  });
+              }
+              
+              for (auto& th : ths) th.join();
+              
+              unsigned long total_chunks = next_chunk.load();
+              if (total_chunks > global_blocks.size()) total_chunks = global_blocks.size();
+              
+              if (total_chunks == 0) {
+                  cout << "0桁" << endl;
+                  return 0;
+              }
+              
+              unsigned long active_chunks = total_chunks;
+              Mpz global_tmp;
+              
+              // 欠落のない完全なボトムアップ二分木結合
+              while (active_chunks > 1) {
+                  unsigned long next_active = 0;
+                  for (unsigned long i = 0; i < active_chunks; i += 2) {
+                      if (i + 1 < active_chunks) {
+                          combine_into_left(global_blocks[i], global_blocks[i+1], global_tmp);
+                      }
+                      if (next_active != i) {
+                          global_blocks[next_active].swap(global_blocks[i]);
+                      }
+                      next_active++;
+                  }
+                  active_chunks = next_active;
+              }
+              
+              unsigned long terms = total_chunks * CHUNK;
+              long double digits = (long double)terms * DIGITS_PER_TERM;
+              
+              cout << (unsigned long)(digits - 8) << "桁" << endl;
+              return 0;
+          }
+          EOF
 
       - name: Compile
         run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmp -o pi
