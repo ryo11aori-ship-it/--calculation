@@ -19,20 +19,22 @@ jobs:
           #include <chrono>
           #include <gmp.h>
           #include <iostream>
+          #include <queue>
           #include <thread>
           #include <vector>
           using namespace std;
 
+          // 【注意】この秒数は「スレッドがタスクを取得する限界時間」です。
+          // 全体の実行時間を2分使いたい場合は、ここを 110 などに増やしてください。
           static constexpr unsigned long LIMIT_SEC = 55;
-          static constexpr unsigned long CHUNK = 4096;
-          static constexpr unsigned long BLOCKS_PER_TASK = 4;
+          static constexpr unsigned long CHUNK = 8192; // タスク取得のオーバーヘッドをさらに減らすため倍増
+          static constexpr unsigned long BLOCKS_PER_TASK = 2;
 
           static constexpr unsigned long long A = 13591409ULL;
           static constexpr unsigned long long B = 545140134ULL;
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
 
-          // RAIIラッパー。コピーや再割り当てを防ぎ、内部バッファを極力再利用する
           struct Mpz {
               mpz_t v;
               Mpz() { mpz_init(v); }
@@ -49,14 +51,13 @@ jobs:
               void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
           };
 
-          // 一時変数(out)を作らず、Lに直接結果を書き込んでメモリ割り当てを回避
-          static inline void combine_into_left(BS& L, const BS& R) {
-              // L.T = L.T * R.Q + R.T * L.P
+          // tmp を明示的に渡すことで、GMP内部の暗黙的なメモリ確保（mpz_addmulのオーバーヘッド）を完全に排除
+          static inline void combine_into_left(BS& L, const BS& R, Mpz& tmp) {
+              mpz_mul(tmp.get(), R.T.get(), L.P.get());
               mpz_mul(L.T.get(), L.T.get(), R.Q.get());
-              mpz_addmul(L.T.get(), R.T.get(), L.P.get());
-              // L.P = L.P * R.P
+              mpz_add(L.T.get(), L.T.get(), tmp.get());
+              
               mpz_mul(L.P.get(), L.P.get(), R.P.get());
-              // L.Q = L.Q * R.Q
               mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
           }
 
@@ -81,25 +82,24 @@ jobs:
               if (k & 1) mpz_neg(o.T.get(), o.T.get());
           }
 
-          // スレッドごとに使い回す再帰ツリー用の作業メモリ
           struct Workspace {
               array<BS, 32> W;
+              Mpz tmp;
           };
 
-          // 戻り値でBSを返さず、参照渡しでバッファを使い回す
           static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
               if (b - a == 1) { term_into(L, a); return; }
               unsigned long m = (a + b) >> 1;
               bs(a, m, L, ws, depth + 1);
               bs(m, b, ws.W[depth], ws, depth + 1);
-              combine_into_left(L, ws.W[depth]);
+              combine_into_left(L, ws.W[depth], ws.tmp);
           }
 
-          // optionalの代わりにboolフラグを使用し、内部のmpz_tバッファを維持する
           struct BinList {
               array<BS, 64> bins;
               array<bool, 64> filled{};
               size_t maxl = 0;
+              Mpz tmp;
 
               void push(BS& part) {
                   size_t lvl = 0;
@@ -111,12 +111,19 @@ jobs:
                           maxl = max(maxl, lvl);
                           return;
                       }
-                      combine_into_left(bins[lvl], part);
+                      combine_into_left(bins[lvl], part, tmp);
                       part.swap(bins[lvl]);
                       filled[lvl] = false;
                       ++lvl;
                   }
               }
+          };
+
+          // 優先度付きキューを使って最もサイズの小さい（軽い）ブロックから結合していくための構造体
+          struct PQNode {
+              BS* bs;
+              unsigned long weight;
+              bool operator>(const PQNode& o) const { return weight > o.weight; }
           };
 
           int main() {
@@ -131,8 +138,8 @@ jobs:
 
               for (unsigned t = 0; t < workers; ++t) {
                   ths.emplace_back([&, t]() {
-                      BS part;       // スレッド内でずっと使い回されるバッファ
-                      Workspace ws;  // 再帰ツリー内で使い回されるバッファ
+                      BS part;
+                      Workspace ws;
                       while (true) {
                           auto now = chrono::steady_clock::now();
                           if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) break;
@@ -146,25 +153,23 @@ jobs:
 
               for (auto& th : ths) th.join();
 
-              // global reduce
-              BinList global_bins;
+              // ★劇的改善ポイント：サイズの小さなブロック同士からハフマン木のように結合（完全バランス木）
+              priority_queue<PQNode, vector<PQNode>, greater<PQNode>> pq;
               for (unsigned t = 0; t < workers; ++t) {
                   for (size_t i = 0; i <= local_bins[t].maxl; ++i) {
                       if (local_bins[t].filled[i]) {
-                          global_bins.push(local_bins[t].bins[i]);
+                          pq.push({&local_bins[t].bins[i], 1ul << i});
                       }
                   }
               }
 
-              // final combine
-              BS total;
-              bool init = false;
-              for (int i = (int)global_bins.maxl; i >= 0; --i) {
-                  if (!global_bins.filled[i]) continue;
-                  if (!init) { total.swap(global_bins.bins[i]); init = true; }
-                  else {
-                      combine_into_left(total, global_bins.bins[i]);
-                  }
+              Mpz global_tmp;
+              while (pq.size() > 1) {
+                  auto n1 = pq.top(); pq.pop();
+                  auto n2 = pq.top(); pq.pop();
+                  combine_into_left(*n1.bs, *n2.bs, global_tmp);
+                  n1.weight += n2.weight;
+                  pq.push(n1);
               }
 
               unsigned long terms = next_term.load() - 1;
