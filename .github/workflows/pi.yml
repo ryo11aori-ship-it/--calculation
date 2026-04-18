@@ -19,14 +19,12 @@ jobs:
           #include <chrono>
           #include <gmp.h>
           #include <iostream>
-          #include <optional>
           #include <thread>
           #include <vector>
           using namespace std;
 
           static constexpr unsigned long LIMIT_SEC = 55;
           static constexpr unsigned long CHUNK = 4096;
-          static constexpr unsigned long LEAF = 128;
           static constexpr unsigned long BLOCKS_PER_TASK = 4;
 
           static constexpr unsigned long long A = 13591409ULL;
@@ -34,14 +32,13 @@ jobs:
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
 
+          // RAIIラッパー。コピーや再割り当てを防ぎ、内部バッファを極力再利用する
           struct Mpz {
               mpz_t v;
               Mpz() { mpz_init(v); }
               ~Mpz() { mpz_clear(v); }
               Mpz(const Mpz&) = delete;
               Mpz& operator=(const Mpz&) = delete;
-              Mpz(Mpz&& o) noexcept { mpz_init(v); mpz_swap(v, o.v); }
-              Mpz& operator=(Mpz&& o) noexcept { mpz_swap(v, o.v); return *this; }
               void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
               mpz_ptr get() { return v; }
               mpz_srcptr get() const { return v; }
@@ -52,11 +49,15 @@ jobs:
               void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
           };
 
-          static inline void combine_into(BS& out, const BS& L, const BS& R) {
-              mpz_mul(out.P.get(), L.P.get(), R.P.get());
-              mpz_mul(out.Q.get(), L.Q.get(), R.Q.get());
-              mpz_mul(out.T.get(), L.T.get(), R.Q.get());
-              mpz_addmul(out.T.get(), R.T.get(), L.P.get());
+          // 一時変数(out)を作らず、Lに直接結果を書き込んでメモリ割り当てを回避
+          static inline void combine_into_left(BS& L, const BS& R) {
+              // L.T = L.T * R.Q + R.T * L.P
+              mpz_mul(L.T.get(), L.T.get(), R.Q.get());
+              mpz_addmul(L.T.get(), R.T.get(), L.P.get());
+              // L.P = L.P * R.P
+              mpz_mul(L.P.get(), L.P.get(), R.P.get());
+              // L.Q = L.Q * R.Q
+              mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
           }
 
           static inline void term_into(BS& o, unsigned long k) {
@@ -80,91 +81,89 @@ jobs:
               if (k & 1) mpz_neg(o.T.get(), o.T.get());
           }
 
-          static BS bs(unsigned long a, unsigned long b) {
-              if (b - a == 1) { BS r; term_into(r, a); return r; }
-              if (b - a <= LEAF) {
-                  BS r; term_into(r, a);
-                  for (unsigned long k=a+1;k<b;++k){
-                      BS t; term_into(t,k);
-                      BS tmp; combine_into(tmp,r,t);
-                      r.swap(tmp);
-                  }
-                  return r;
-              }
-              unsigned long m = (a+b)>>1;
-              BS L = bs(a,m);
-              BS R = bs(m,b);
-              BS o; combine_into(o,L,R);
-              return o;
+          // スレッドごとに使い回す再帰ツリー用の作業メモリ
+          struct Workspace {
+              array<BS, 32> W;
+          };
+
+          // 戻り値でBSを返さず、参照渡しでバッファを使い回す
+          static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
+              if (b - a == 1) { term_into(L, a); return; }
+              unsigned long m = (a + b) >> 1;
+              bs(a, m, L, ws, depth + 1);
+              bs(m, b, ws.W[depth], ws, depth + 1);
+              combine_into_left(L, ws.W[depth]);
           }
 
-          static void push_part(array<optional<BS>,64>& bins, size_t& maxl, BS part){
-              size_t lvl=0;
-              while(true){
-                  if(lvl>=bins.size()){
-                      bins.back()=move(part);
-                      maxl=max(maxl,bins.size()-1);
-                      return;
-                  }
-                  if(!bins[lvl]){
-                      bins[lvl]=move(part);
-                      maxl=max(maxl,lvl);
-                      return;
-                  }
-                  BS tmp; combine_into(tmp,*bins[lvl],part);
-                  bins[lvl].reset();
-                  part.swap(tmp);
-                  ++lvl;
-              }
-          }
+          // optionalの代わりにboolフラグを使用し、内部のmpz_tバッファを維持する
+          struct BinList {
+              array<BS, 64> bins;
+              array<bool, 64> filled{};
+              size_t maxl = 0;
 
-          int main(){
+              void push(BS& part) {
+                  size_t lvl = 0;
+                  while (true) {
+                      if (lvl >= 64) break;
+                      if (!filled[lvl]) {
+                          bins[lvl].swap(part);
+                          filled[lvl] = true;
+                          maxl = max(maxl, lvl);
+                          return;
+                      }
+                      combine_into_left(bins[lvl], part);
+                      part.swap(bins[lvl]);
+                      filled[lvl] = false;
+                      ++lvl;
+                  }
+              }
+          };
+
+          int main() {
               auto start = chrono::steady_clock::now();
 
               atomic<unsigned long> next_term{1};
-              const unsigned workers = max(1u,min(thread::hardware_concurrency()?thread::hardware_concurrency():1u,4u));
+              const unsigned workers = max(1u, min(thread::hardware_concurrency() ? thread::hardware_concurrency() : 1u, 4u));
               const unsigned long task_span = CHUNK * BLOCKS_PER_TASK;
 
-              array<array<optional<BS>,64>,4> local_bins;
-              array<size_t,4> local_max{};
+              vector<BinList> local_bins(workers);
               vector<thread> ths;
 
-              for(unsigned t=0;t<workers;++t){
-                  ths.emplace_back([&,t](){
-                      while(true){
-                          auto now=chrono::steady_clock::now();
-                          if(chrono::duration_cast<chrono::seconds>(now-start).count()>=LIMIT_SEC) break;
+              for (unsigned t = 0; t < workers; ++t) {
+                  ths.emplace_back([&, t]() {
+                      BS part;       // スレッド内でずっと使い回されるバッファ
+                      Workspace ws;  // 再帰ツリー内で使い回されるバッファ
+                      while (true) {
+                          auto now = chrono::steady_clock::now();
+                          if (chrono::duration_cast<chrono::seconds>(now - start).count() >= LIMIT_SEC) break;
 
                           unsigned long a = next_term.fetch_add(task_span, memory_order_relaxed);
-                          BS part = bs(a,a+task_span);
-                          push_part(local_bins[t], local_max[t], move(part));
+                          bs(a, a + task_span, part, ws);
+                          local_bins[t].push(part);
                       }
                   });
               }
 
-              for(auto& th:ths) th.join();
+              for (auto& th : ths) th.join();
 
-              // global reduce（ここが重要）
-              array<optional<BS>,64> bins;
-              size_t maxl=0;
-
-              for(unsigned t=0;t<workers;++t){
-                  for(int i=(int)local_max[t];i>=0;--i){
-                      if(local_bins[t][i]){
-                          push_part(bins,maxl,move(*local_bins[t][i]));
+              // global reduce
+              BinList global_bins;
+              for (unsigned t = 0; t < workers; ++t) {
+                  for (size_t i = 0; i <= local_bins[t].maxl; ++i) {
+                      if (local_bins[t].filled[i]) {
+                          global_bins.push(local_bins[t].bins[i]);
                       }
                   }
               }
 
-              // final combine（最大サイズ乗算）
+              // final combine
               BS total;
-              bool init=false;
-              for(int i=(int)maxl;i>=0;--i){
-                  if(!bins[i]) continue;
-                  if(!init){ total=move(*bins[i]); init=true; }
-                  else{
-                      BS tmp; combine_into(tmp,total,*bins[i]);
-                      total.swap(tmp);
+              bool init = false;
+              for (int i = (int)global_bins.maxl; i >= 0; --i) {
+                  if (!global_bins.filled[i]) continue;
+                  if (!init) { total.swap(global_bins.bins[i]); init = true; }
+                  else {
+                      combine_into_left(total, global_bins.bins[i]);
                   }
               }
 
