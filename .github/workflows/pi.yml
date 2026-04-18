@@ -13,144 +13,166 @@ jobs:
       - name: Create_Code
         run: |
           cat << 'EOF' > main.cpp
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <gmp.h>
-#include <iostream>
-#include <mutex>
-#include <thread>
-#include <vector>
-using namespace std;
-static constexpr unsigned long LIMIT_SEC = 55;
-static constexpr unsigned long CHUNK = 8192;
-static constexpr unsigned long long A = 13591409ULL;
-static constexpr unsigned long long B = 545140134ULL;
-static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
-static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
-struct Mpz {
-mpz_t v;
-Mpz() { mpz_init(v); }
-~Mpz() { mpz_clear(v); }
-Mpz(const Mpz&) = delete;
-Mpz& operator=(const Mpz&) = delete;
-void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
-mpz_ptr get() { return v; }
-mpz_srcptr get() const { return v; }
-};
-struct BS {
-Mpz P, Q, T;
-void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
-};
-static inline void combine_into_left(BS& L, const BS& R, Mpz& tmp) {
-mpz_mul(tmp.get(), R.T.get(), L.P.get());
-mpz_mul(L.T.get(), L.T.get(), R.Q.get());
-mpz_add(L.T.get(), L.T.get(), tmp.get());
-mpz_mul(L.P.get(), L.P.get(), R.P.get());
-mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
-}
-static inline void term_into(BS& o, unsigned long k) {
-if (k == 0) {
-mpz_set_ui(o.P.get(), 1);
-mpz_set_ui(o.Q.get(), 1);
-mpz_set_ui(o.T.get(), A);
-return;
-}
-mpz_set_ui(o.P.get(), 6*k-5);
-mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
-mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
-mpz_set_ui(o.Q.get(), k);
-mpz_mul_ui(o.Q.get(), o.Q.get(), k);
-mpz_mul_ui(o.Q.get(), o.Q.get(), k);
-mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
-mpz_set(o.T.get(), o.P.get());
-mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
-if (k & 1) mpz_neg(o.T.get(), o.T.get());
-}
-struct Workspace {
-array<BS, 64> W;
-Mpz tmp;
-};
-static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
-if (b - a == 1) { term_into(L, a); return; }
-unsigned long m = (a + b) >> 1;
-bs(a, m, L, ws, depth + 1);
-bs(m, b, ws.W[depth], ws, depth + 1);
-combine_into_left(L, ws.W[depth], ws.tmp);
-}
-struct BinList {
-array<BS, 64> bins;
-array<bool, 64> filled{};
-Mpz tmp;
-void push(BS& part) {
-size_t lvl = 0;
-while (true) {
-if (lvl >= 64) break;
-if (!filled[lvl]) {
-bins[lvl].swap(part);
-filled[lvl] = true;
-return;
-}
-combine_into_left(bins[lvl], part, tmp);
-part.swap(bins[lvl]);
-filled[lvl] = false;
-++lvl;
-}
-}
-};
-atomic<unsigned long> next_chunk{0};
-unsigned long next_merge = 0;
-BinList global_binlist;
-mutex mtx;
-condition_variable cv;
-int main() {
-auto start = chrono::steady_clock::now();
-auto deadline = start + chrono::seconds(LIMIT_SEC);
-const unsigned workers = max(1u, min(thread::hardware_concurrency() ? thread::hardware_concurrency() : 1u, 4u));
-vector<thread> ths;
-for (unsigned t = 0; t < workers; ++t) {
-ths.emplace_back([&]() {
-Workspace ws;
-while (true) {
-if (chrono::steady_clock::now() >= deadline) break;
-unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
-unsigned long a = cid * CHUNK;
-unsigned long b = (cid + 1) * CHUNK;
-BS L;
-bs(a, b, L, ws, 0);
-unique_lock<mutex> lk(mtx);
-cv.wait(lk, [&]{ return cid == next_merge; });
-global_binlist.push(L);
-next_merge++;
-cv.notify_all();
-}
-});
-}
-for (auto& th : ths) th.join();
-if (next_merge == 0) {
-cout << "0桁" << endl;
-return 0;
-}
-BS final_bs;
-bool first = true;
-Mpz global_tmp;
-for (int i = 63; i >= 0; --i) {
-if (global_binlist.filled[i]) {
-if (first) {
-final_bs.swap(global_binlist.bins[i]);
-first = false;
-} else {
-combine_into_left(final_bs, global_binlist.bins[i], global_tmp);
-}
-}
-}
-unsigned long terms = next_merge * CHUNK;
-long double digits = (long double)terms * DIGITS_PER_TERM;
-cout << (unsigned long)(digits - 8) << "桁" << endl;
-return 0;
-}
-EOF
+          #include <array>
+          #include <atomic>
+          #include <chrono>
+          #include <gmp.h>
+          #include <iostream>
+          #include <map>
+          #include <mutex>
+          #include <thread>
+          #include <vector>
+          using namespace std;
+          static constexpr unsigned long LIMIT_SEC = 55;
+          static constexpr unsigned long CHUNK = 8192;
+          static constexpr unsigned long long A = 13591409ULL;
+          static constexpr unsigned long long B = 545140134ULL;
+          static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
+          static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
+          struct Mpz {
+          mpz_t v;
+          Mpz() { mpz_init(v); }
+          ~Mpz() { mpz_clear(v); }
+          Mpz(const Mpz&) = delete;
+          Mpz& operator=(const Mpz&) = delete;
+          void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
+          mpz_ptr get() { return v; }
+          mpz_srcptr get() const { return v; }
+          };
+          struct BS {
+          Mpz P, Q, T;
+          void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
+          };
+          static inline void combine_into_left(BS& L, const BS& R, Mpz& tmp) {
+          mpz_mul(tmp.get(), R.T.get(), L.P.get());
+          mpz_mul(L.T.get(), L.T.get(), R.Q.get());
+          mpz_add(L.T.get(), L.T.get(), tmp.get());
+          mpz_mul(L.P.get(), L.P.get(), R.P.get());
+          mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
+          }
+          static inline void term_into(BS& o, unsigned long k) {
+          if (k == 0) {
+          mpz_set_ui(o.P.get(), 1);
+          mpz_set_ui(o.Q.get(), 1);
+          mpz_set_ui(o.T.get(), A);
+          return;
+          }
+          mpz_set_ui(o.P.get(), 6*k-5);
+          mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
+          mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
+          mpz_set_ui(o.Q.get(), k);
+          mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+          mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+          mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
+          mpz_set(o.T.get(), o.P.get());
+          mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
+          if (k & 1) mpz_neg(o.T.get(), o.T.get());
+          }
+          struct Workspace {
+          array<BS, 64> W;
+          Mpz tmp;
+          };
+          static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
+          if (b - a == 1) { term_into(L, a); return; }
+          unsigned long m = (a + b) >> 1;
+          bs(a, m, L, ws, depth + 1);
+          bs(m, b, ws.W[depth], ws, depth + 1);
+          combine_into_left(L, ws.W[depth], ws.tmp);
+          }
+          struct BinList {
+          array<BS, 64> bins;
+          array<bool, 64> filled{};
+          Mpz tmp;
+          void push(BS& part) {
+          size_t lvl = 0;
+          while (true) {
+          if (lvl >= 64) break;
+          if (!filled[lvl]) {
+          bins[lvl].swap(part);
+          filled[lvl] = true;
+          return;
+          }
+          combine_into_left(bins[lvl], part, tmp);
+          part.swap(bins[lvl]);
+          filled[lvl] = false;
+          ++lvl;
+          }
+          }
+          };
+          int main() {
+          auto start = chrono::steady_clock::now();
+          auto deadline = start + chrono::seconds(LIMIT_SEC);
+          atomic<unsigned long> next_chunk{0};
+          map<unsigned long, BS> results;
+          mutex mtx;
+          atomic<bool> workers_done{false};
+          BinList global_binlist;
+          unsigned long total_merged = 0;
+          thread merger([&]() {
+          unsigned long expected_cid = 0;
+          while (true) {
+          BS part;
+          bool got = false;
+          {
+          lock_guard<mutex> lk(mtx);
+          auto it = results.find(expected_cid);
+          if (it != results.end()) {
+          part.swap(it->second);
+          results.erase(it);
+          got = true;
+          }
+          }
+          if (got) {
+          global_binlist.push(part);
+          expected_cid++;
+          } else {
+          if (workers_done.load()) break;
+          this_thread::yield();
+          }
+          }
+          total_merged = expected_cid;
+          });
+          unsigned hc = thread::hardware_concurrency();
+          const unsigned workers = max(1u, hc > 1 ? hc - 1 : 1);
+          vector<thread> ths;
+          for (unsigned t = 0; t < workers; ++t) {
+          ths.emplace_back([&]() {
+          Workspace ws;
+          while (chrono::steady_clock::now() < deadline) {
+          unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
+          BS part;
+          bs(cid * CHUNK, (cid + 1) * CHUNK, part, ws, 0);
+          lock_guard<mutex> lk(mtx);
+          results[cid].swap(part);
+          }
+          });
+          }
+          for (auto& th : ths) th.join();
+          workers_done.store(true);
+          merger.join();
+          if (total_merged == 0) {
+          cout << "0桁" << endl;
+          return 0;
+          }
+          BS final_bs;
+          bool first = true;
+          Mpz global_tmp;
+          for (int i = 63; i >= 0; --i) {
+          if (global_binlist.filled[i]) {
+          if (first) {
+          final_bs.swap(global_binlist.bins[i]);
+          first = false;
+          } else {
+          combine_into_left(final_bs, global_binlist.bins[i], global_tmp);
+          }
+          }
+          }
+          unsigned long terms = total_merged * CHUNK;
+          long double digits = (long double)terms * DIGITS_PER_TERM;
+          cout << (unsigned long)(digits - 8) << "桁" << endl;
+          return 0;
+          }
+          EOF
 
       - name: Compile
         run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmp -o pi
