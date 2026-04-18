@@ -106,6 +106,7 @@ jobs:
           map<unsigned long, BS> results;
           mutex mtx;
           atomic<bool> workers_done{false};
+          atomic<int> pending{0}; // 【ブレーキ役】未結合の部品数
           BinList global_binlist;
           unsigned long total_merged = 0;
           thread merger([&]() {
@@ -123,11 +124,12 @@ jobs:
           }
           }
           if (got) {
+          pending.fetch_sub(1, memory_order_relaxed);
           global_binlist.push(part);
           expected_cid++;
           } else {
-          if (workers_done.load()) break;
-          this_thread::yield();
+          if (workers_done.load() && expected_cid == next_chunk.load(memory_order_relaxed)) break;
+          this_thread::sleep_for(chrono::microseconds(100));
           }
           }
           total_merged = expected_cid;
@@ -139,11 +141,17 @@ jobs:
           ths.emplace_back([&]() {
           Workspace ws;
           while (chrono::steady_clock::now() < deadline) {
+          // 【超重要】結合待ちの部品が16個を超えたら、結合されるまで待機する（作りすぎ防止）
+          if (pending.load(memory_order_relaxed) > 16) {
+          this_thread::sleep_for(chrono::milliseconds(1));
+          continue;
+          }
           unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
           BS part;
           bs(cid * CHUNK, (cid + 1) * CHUNK, part, ws, 0);
           lock_guard<mutex> lk(mtx);
           results[cid].swap(part);
+          pending.fetch_add(1, memory_order_relaxed);
           }
           });
           }
