@@ -22,165 +22,221 @@ jobs:
           #include <mutex>
           #include <thread>
           #include <vector>
+
           using namespace std;
+
           static constexpr unsigned long LIMIT_SEC = 55;
           static constexpr unsigned long CHUNK = 8192;
           static constexpr unsigned long long A = 13591409ULL;
           static constexpr unsigned long long B = 545140134ULL;
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
           static constexpr long double DIGITS_PER_TERM = 14.181647462725477L;
+
           struct Mpz {
-          mpz_t v;
-          Mpz() { mpz_init(v); }
-          ~Mpz() { mpz_clear(v); }
-          Mpz(const Mpz&) = delete;
-          Mpz& operator=(const Mpz&) = delete;
-          void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
-          mpz_ptr get() { return v; }
-          mpz_srcptr get() const { return v; }
+              mpz_t v;
+              Mpz() { mpz_init(v); }
+              ~Mpz() { mpz_clear(v); }
+              Mpz(const Mpz&) = delete;
+              Mpz& operator=(const Mpz&) = delete;
+              void swap(Mpz& o) noexcept { mpz_swap(v, o.v); }
+              mpz_ptr get() { return v; }
+              mpz_srcptr get() const { return v; }
           };
+
           struct BS {
-          Mpz P, Q, T;
-          void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
+              Mpz P, Q, T;
+              void swap(BS& o) noexcept { P.swap(o.P); Q.swap(o.Q); T.swap(o.T); }
           };
+
           static inline void combine_into_left(BS& L, const BS& R, Mpz& tmp) {
-          mpz_mul(tmp.get(), R.T.get(), L.P.get());
-          mpz_mul(L.T.get(), L.T.get(), R.Q.get());
-          mpz_add(L.T.get(), L.T.get(), tmp.get());
-          mpz_mul(L.P.get(), L.P.get(), R.P.get());
-          mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
+              mpz_mul(tmp.get(), R.T.get(), L.P.get());
+              mpz_mul(L.T.get(), L.T.get(), R.Q.get());
+              mpz_add(L.T.get(), L.T.get(), tmp.get());
+              mpz_mul(L.P.get(), L.P.get(), R.P.get());
+              mpz_mul(L.Q.get(), L.Q.get(), R.Q.get());
           }
+
           static inline void term_into(BS& o, unsigned long k) {
-          if (k == 0) {
-          mpz_set_ui(o.P.get(), 1);
-          mpz_set_ui(o.Q.get(), 1);
-          mpz_set_ui(o.T.get(), A);
-          return;
+              if (k == 0) {
+                  mpz_set_ui(o.P.get(), 1);
+                  mpz_set_ui(o.Q.get(), 1);
+                  mpz_set_ui(o.T.get(), A);
+                  return;
+              }
+              mpz_set_ui(o.P.get(), 6*k-5);
+              mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
+              mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
+              mpz_set_ui(o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), k);
+              mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
+              mpz_set(o.T.get(), o.P.get());
+              mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
+              if (k & 1) mpz_neg(o.T.get(), o.T.get());
           }
-          mpz_set_ui(o.P.get(), 6*k-5);
-          mpz_mul_ui(o.P.get(), o.P.get(), 2*k-1);
-          mpz_mul_ui(o.P.get(), o.P.get(), 6*k-1);
-          mpz_set_ui(o.Q.get(), k);
-          mpz_mul_ui(o.Q.get(), o.Q.get(), k);
-          mpz_mul_ui(o.Q.get(), o.Q.get(), k);
-          mpz_mul_ui(o.Q.get(), o.Q.get(), C3_OVER_24);
-          mpz_set(o.T.get(), o.P.get());
-          mpz_mul_ui(o.T.get(), o.T.get(), A + B*k);
-          if (k & 1) mpz_neg(o.T.get(), o.T.get());
-          }
+
           struct Workspace {
-          array<BS, 64> W;
-          Mpz tmp;
+              array<BS, 64> W;
+              Mpz tmp;
           };
+
           static void bs(unsigned long a, unsigned long b, BS& L, Workspace& ws, int depth = 0) {
-          if (b - a == 1) { term_into(L, a); return; }
-          unsigned long m = (a + b) >> 1;
-          bs(a, m, L, ws, depth + 1);
-          bs(m, b, ws.W[depth], ws, depth + 1);
-          combine_into_left(L, ws.W[depth], ws.tmp);
+              if (b - a == 1) { term_into(L, a); return; }
+              unsigned long m = (a + b) >> 1;
+              bs(a, m, L, ws, depth + 1);
+              bs(m, b, ws.W[depth], ws, depth + 1);
+              combine_into_left(L, ws.W[depth], ws.tmp);
           }
+
           struct BinList {
-          array<BS, 64> bins;
-          array<bool, 64> filled{};
-          Mpz tmp;
-          void push(BS& part) {
-          size_t lvl = 0;
-          while (true) {
-          if (lvl >= 64) break;
-          if (!filled[lvl]) {
-          bins[lvl].swap(part);
-          filled[lvl] = true;
-          return;
-          }
-          combine_into_left(bins[lvl], part, tmp);
-          part.swap(bins[lvl]);
-          filled[lvl] = false;
-          ++lvl;
-          }
-          }
+              array<BS, 64> bins;
+              array<bool, 64> filled{};
+              Mpz tmp;
+              void push(BS& part) {
+                  size_t lvl = 0;
+                  while (true) {
+                      if (lvl >= 64) break;
+                      if (!filled[lvl]) {
+                          bins[lvl].swap(part);
+                          filled[lvl] = true;
+                          return;
+                      }
+                      combine_into_left(bins[lvl], part, tmp);
+                      part.swap(bins[lvl]);
+                      filled[lvl] = false;
+                      ++lvl;
+                  }
+              }
           };
+
           int main() {
-          auto start = chrono::steady_clock::now();
-          auto deadline = start + chrono::seconds(LIMIT_SEC);
-          atomic<unsigned long> next_chunk{0};
-          map<unsigned long, BS> results;
-          mutex mtx;
-          atomic<bool> workers_done{false};
-          atomic<int> pending{0}; // 【ブレーキ役】未結合の部品数
-          BinList global_binlist;
-          unsigned long total_merged = 0;
-          thread merger([&]() {
-          unsigned long expected_cid = 0;
-          while (true) {
-          BS part;
-          bool got = false;
-          {
-          lock_guard<mutex> lk(mtx);
-          auto it = results.find(expected_cid);
-          if (it != results.end()) {
-          part.swap(it->second);
-          results.erase(it);
-          got = true;
-          }
-          }
-          if (got) {
-          pending.fetch_sub(1, memory_order_relaxed);
-          global_binlist.push(part);
-          expected_cid++;
-          } else {
-          if (workers_done.load() && expected_cid == next_chunk.load(memory_order_relaxed)) break;
-          this_thread::sleep_for(chrono::microseconds(100));
-          }
-          }
-          total_merged = expected_cid;
-          });
-          unsigned hc = thread::hardware_concurrency();
-          const unsigned workers = max(1u, hc > 1 ? hc - 1 : 1);
-          vector<thread> ths;
-          for (unsigned t = 0; t < workers; ++t) {
-          ths.emplace_back([&]() {
-          Workspace ws;
-          while (chrono::steady_clock::now() < deadline) {
-          // 【超重要】結合待ちの部品が16個を超えたら、結合されるまで待機する（作りすぎ防止）
-          if (pending.load(memory_order_relaxed) > 16) {
-          this_thread::sleep_for(chrono::milliseconds(1));
-          continue;
-          }
-          unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
-          BS part;
-          bs(cid * CHUNK, (cid + 1) * CHUNK, part, ws, 0);
-          lock_guard<mutex> lk(mtx);
-          results[cid].swap(part);
-          pending.fetch_add(1, memory_order_relaxed);
-          }
-          });
-          }
-          for (auto& th : ths) th.join();
-          workers_done.store(true);
-          merger.join();
-          if (total_merged == 0) {
-          cout << "0桁" << endl;
-          return 0;
-          }
-          BS final_bs;
-          bool first = true;
-          Mpz global_tmp;
-          for (int i = 63; i >= 0; --i) {
-          if (global_binlist.filled[i]) {
-          if (first) {
-          final_bs.swap(global_binlist.bins[i]);
-          first = false;
-          } else {
-          combine_into_left(final_bs, global_binlist.bins[i], global_tmp);
-          }
-          }
-          }
-          unsigned long terms = total_merged * CHUNK;
-          long double digits = (long double)terms * DIGITS_PER_TERM;
-          cout << (unsigned long)(digits - 8) << "桁" << endl;
-          return 0;
+              auto start = chrono::steady_clock::now();
+              auto deadline = start + chrono::seconds(LIMIT_SEC);
+              
+              atomic<unsigned long> next_chunk{0};
+              map<unsigned long, BS> results;
+              mutex mtx;
+              atomic<bool> workers_done{false};
+              atomic<int> pending{0}; // 【ブレーキ役】未結合の部品数
+              BinList global_binlist;
+              unsigned long total_merged = 0;
+              
+              thread merger([&]() {
+                  unsigned long expected_cid = 0;
+                  while (true) {
+                      BS part;
+                      bool got = false;
+                      {
+                          lock_guard<mutex> lk(mtx);
+                          auto it = results.find(expected_cid);
+                          if (it != results.end()) {
+                              part.swap(it->second);
+                              results.erase(it);
+                              got = true;
+                          }
+                      }
+                      if (got) {
+                          pending.fetch_sub(1, memory_order_relaxed);
+                          global_binlist.push(part);
+                          expected_cid++;
+                      } else {
+                          if (workers_done.load() && expected_cid == next_chunk.load(memory_order_relaxed)) break;
+                          this_thread::sleep_for(chrono::microseconds(100));
+                      }
+                  }
+                  total_merged = expected_cid;
+              });
+              
+              unsigned hc = thread::hardware_concurrency();
+              const unsigned workers = max(1u, hc > 1 ? hc - 1 : 1);
+              vector<thread> ths;
+              
+              for (unsigned t = 0; t < workers; ++t) {
+                  ths.emplace_back([&]() {
+                      Workspace ws;
+                      while (chrono::steady_clock::now() < deadline) {
+                          // 【超重要】結合待ちの部品が16個を超えたら、結合されるまで待機する（作りすぎ防止）
+                          if (pending.load(memory_order_relaxed) > 16) {
+                              this_thread::sleep_for(chrono::milliseconds(1));
+                              continue;
+                          }
+                          unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
+                          BS part;
+                          bs(cid * CHUNK, (cid + 1) * CHUNK, part, ws, 0);
+                          lock_guard<mutex> lk(mtx);
+                          results[cid].swap(part);
+                          pending.fetch_add(1, memory_order_relaxed);
+                      }
+                  });
+              }
+              
+              for (auto& th : ths) th.join();
+              workers_done.store(true);
+              merger.join();
+              
+              if (total_merged == 0) {
+                  cout << "0桁" << endl;
+                  return 0;
+              }
+              
+              BS final_bs;
+              bool first = true;
+              Mpz global_tmp;
+              for (int i = 63; i >= 0; --i) {
+                  if (global_binlist.filled[i]) {
+                      if (first) {
+                          final_bs.swap(global_binlist.bins[i]);
+                          first = false;
+                      } else {
+                          combine_into_left(final_bs, global_binlist.bins[i], global_tmp);
+                      }
+                  }
+              }
+
+              // --- πの先頭10桁チェック（軽量検証） ---
+              {
+                  mpz_t scale, sqrtC, tmp, num, pi_scaled;
+                  mpz_inits(scale, sqrtC, tmp, num, pi_scaled, NULL);
+
+                  // scale = 10^20
+                  mpz_ui_pow_ui(scale, 10, 20);
+
+                  // tmp = scale^2 * 10005
+                  mpz_mul(tmp, scale, scale);
+                  mpz_mul_ui(tmp, tmp, 10005);
+
+                  // sqrtC = sqrt(10005) * scale
+                  mpz_sqrt(sqrtC, tmp);
+
+                  // num = Q * 426880 * sqrtC
+                  mpz_mul(num, final_bs.Q.get(), sqrtC);
+                  mpz_mul_ui(num, num, 426880);
+
+                  // pi_scaled = num / T
+                  mpz_fdiv_q(pi_scaled, num, final_bs.T.get());
+
+                  // 文字列化して先頭10桁
+                  char* str = mpz_get_str(NULL, 10, pi_scaled);
+                  string s(str);
+
+                  if (s.size() >= 10) {
+                      cout << "PI_HEAD=" << s.substr(0, 10) << endl;
+                  } else {
+                      cout << "PI_HEAD=ERROR" << endl;
+                  }
+
+                  free(str);
+                  mpz_clears(scale, sqrtC, tmp, num, pi_scaled, NULL);
+              }
+              // --- ここまで ---
+              
+              unsigned long terms = total_merged * CHUNK;
+              long double digits = (long double)terms * DIGITS_PER_TERM;
+              cout << (unsigned long)(digits - 8) << "桁" << endl;
+              return 0;
           }
           EOF
+
 
       - name: Compile
         run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmp -o pi
