@@ -16,6 +16,7 @@ jobs:
           #include <array>
           #include <atomic>
           #include <chrono>
+          #include <condition_variable>
           #include <gmp.h>
           #include <iostream>
           #include <map>
@@ -26,7 +27,7 @@ jobs:
           using namespace std;
 
           static constexpr unsigned long LIMIT_SEC = 55;
-          static constexpr unsigned long CHUNK = 8192;
+          static constexpr unsigned long CHUNK = 16384;
           static constexpr unsigned long long A = 13591409ULL;
           static constexpr unsigned long long B = 545140134ULL;
           static constexpr unsigned long long C3_OVER_24 = 10939058860032000ULL;
@@ -116,8 +117,9 @@ jobs:
               atomic<unsigned long> next_chunk{0};
               map<unsigned long, BS> results;
               mutex mtx;
+              condition_variable cv;
               atomic<bool> workers_done{false};
-              atomic<int> pending{0}; // 【ブレーキ役】未結合の部品数
+              atomic<int> pending{0};
               BinList global_binlist;
               unsigned long total_merged = 0;
               
@@ -127,7 +129,13 @@ jobs:
                       BS part;
                       bool got = false;
                       {
-                          lock_guard<mutex> lk(mtx);
+                          unique_lock<mutex> lk(mtx);
+                          cv.wait(lk, [&]() {
+                              auto it = results.find(expected_cid);
+                              return it != results.end() || 
+                                     (workers_done.load(memory_order_relaxed) && 
+                                      expected_cid == next_chunk.load(memory_order_relaxed));
+                          });
                           auto it = results.find(expected_cid);
                           if (it != results.end()) {
                               part.swap(it->second);
@@ -139,39 +147,43 @@ jobs:
                           pending.fetch_sub(1, memory_order_relaxed);
                           global_binlist.push(part);
                           expected_cid++;
+                          cv.notify_one();
                       } else {
-                          if (workers_done.load() && expected_cid == next_chunk.load(memory_order_relaxed)) break;
-                          this_thread::sleep_for(chrono::microseconds(100));
+                          if (workers_done.load(memory_order_relaxed) && 
+                              expected_cid == next_chunk.load(memory_order_relaxed)) break;
                       }
                   }
                   total_merged = expected_cid;
               });
               
               unsigned hc = thread::hardware_concurrency();
-              const unsigned workers = max(1u, hc > 1 ? hc - 1 : 1);
+              const unsigned workers = max(1u, hc);
               vector<thread> ths;
               
               for (unsigned t = 0; t < workers; ++t) {
                   ths.emplace_back([&]() {
                       Workspace ws;
                       while (chrono::steady_clock::now() < deadline) {
-                          // 【超重要】結合待ちの部品が16個を超えたら、結合されるまで待機する（作りすぎ防止）
-                          if (pending.load(memory_order_relaxed) > 16) {
+                          if (pending.load(memory_order_relaxed) > 32) {
                               this_thread::sleep_for(chrono::milliseconds(1));
                               continue;
                           }
                           unsigned long cid = next_chunk.fetch_add(1, memory_order_relaxed);
                           BS part;
                           bs(cid * CHUNK, (cid + 1) * CHUNK, part, ws, 0);
-                          lock_guard<mutex> lk(mtx);
-                          results[cid].swap(part);
-                          pending.fetch_add(1, memory_order_relaxed);
+                          {
+                              lock_guard<mutex> lk(mtx);
+                              results[cid].swap(part);
+                              pending.fetch_add(1, memory_order_relaxed);
+                          }
+                          cv.notify_one();
                       }
                   });
               }
               
               for (auto& th : ths) th.join();
               workers_done.store(true);
+              cv.notify_all();
               merger.join();
               
               if (total_merged == 0) {
@@ -237,7 +249,6 @@ jobs:
           }
           EOF
 
-
       - name: Compile
         run: g++ -O3 -march=native -flto -pipe -funroll-loops -fomit-frame-pointer -DNDEBUG -std=c++17 -pthread main.cpp -lgmp -o pi
 
@@ -248,4 +259,3 @@ jobs:
         with:
           name: pi-benchmark-result
           path: pi_result.txt
-
